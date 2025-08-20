@@ -1,0 +1,33 @@
+# src/dataset.py
+
+from datasets import load_dataset
+
+def load_pusht_dataset(split="train"):
+    """
+    Loads the PushT dataset from Hugging Face using the LeRobot framework.
+
+    Args:
+        split (str): Which dataset split to load ("train", "test", or "validation").
+
+    Returns:
+        dataset: Hugging Face dataset object
+    """
+    dataset = load_dataset("lerobot/pusht", split=split)
+    return dataset
+
+def main():
+    # Load training and test sets
+    train_dataset = load_pusht_dataset("train")
+    test_dataset = load_pusht_dataset("test")
+
+    print("Train dataset length:", len(train_dataset))
+    print("Test dataset length:", len(test_dataset))
+
+    # Inspect a single sample
+    sample = train_dataset[0]
+    print("\nSample keys:", sample.keys())
+    print("Sample state:", sample["state"])
+    print("Sample action:", sample["action"])
+
+if __name__ == "__main__":
+    main()
