@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+venv/
+
+# VS Code
+.vscode/
+
+# Data and outputs
+data/
+outputs/
+logs/
+
+# Others
+*.log
