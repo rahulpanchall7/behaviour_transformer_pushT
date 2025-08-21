@@ -1,119 +1,157 @@
 # src/train.py
 
 import torch
-from torch.utils.data import DataLoader
 import torch.nn as nn
 import torch.optim as optim
-import numpy as np
+from torch.utils.data import DataLoader, random_split
 from sklearn.cluster import KMeans
+import numpy as np
 
-from dataset_transformer import PushTDataset
+from dataset_transformer import PushTSequenceDataset
 from model import BehaviorTransformer
 from dataset import load_pusht_parquet
 
-# ---------------------------
-# Hyperparameters
-# ---------------------------
-SEQ_LEN = 32
-BATCH_SIZE = 64
-EPOCHS = 20
-LR = 3e-4
-K_BINS = 16  # number of action clusters
 
-# ---------------------------
-# Load dataset
-# ---------------------------
-df = load_pusht_parquet()
-dataset = PushTDataset(df, seq_len=SEQ_LEN)
+def train_model():
+    # -------------------
+    # Load dataset
+    # -------------------
+    print("Loading dataset...")
+    df = load_pusht_parquet()
+    dataset = PushTSequenceDataset(df, seq_len=32)
+    print(f"Dataset loaded: {len(dataset)} sequences")
 
-# Compute k-means clusters for actions
-all_actions = np.array(df['action'].tolist())
-kmeans = KMeans(n_clusters=K_BINS, random_state=42).fit(all_actions)
-bin_centers = torch.tensor(kmeans.cluster_centers_, dtype=torch.float32)
+    # Train/val split
+    val_size = int(0.1 * len(dataset))
+    train_size = len(dataset) - val_size
+    train_dataset, val_dataset = random_split(dataset, [train_size, val_size])
+    print(f"Split dataset: {train_size} train / {val_size} val")
 
-# ---------------------------
-# Prepare dataloader
-# ---------------------------
-def collate_fn(batch):
-    state_seqs, action_seqs = zip(*batch)
-    states = torch.stack(state_seqs)       # [B, seq_len, state_dim]
-    actions = torch.stack(action_seqs)     # [B, seq_len, action_dim]
+    train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=64)
 
-    # Compute bin indices and residuals
-    # [B, seq_len, k_bins] residuals
-    bin_indices = []
-    residuals = []
-    for b in range(actions.shape[0]):
-        bins = []
-        res = []
-        for t in range(actions.shape[1]):
-            a = actions[b, t]
-            # find closest bin
-            dist = torch.norm(bin_centers - a, dim=1)
-            bin_idx = torch.argmin(dist)
-            bins.append(bin_idx)
-            # residuals for all bins
-            res_vec = torch.zeros(K_BINS, actions.shape[2])
-            res_vec[bin_idx] = a - bin_centers[bin_idx]
-            res.append(res_vec)
-        bin_indices.append(torch.tensor(bins))
-        residuals.append(torch.stack(res))
-    bin_indices = torch.stack(bin_indices)     # [B, seq_len]
-    residuals = torch.stack(residuals)         # [B, seq_len, K_BINS, action_dim]
+    # -------------------
+    # KMeans for action discretization
+    # -------------------
+    print("Running KMeans on actions...")
+    all_actions = np.array(dataset.actions)
+    kmeans = KMeans(n_clusters=64, random_state=42).fit(all_actions)
+    print("KMeans fitted with 64 clusters")
 
-    return states, bin_indices, residuals
+    # -------------------
+    # Define model + optimizer
+    # -------------------
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
 
-dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True, collate_fn=collate_fn)
+    model = BehaviorTransformer(
+        state_dim=2, 
+        action_dim=2,
+        seq_len=32,
+        d_model=128,
+        n_heads=4,
+        n_layers=3,
+        k_bins=64
+    ).to(device)
 
-# ---------------------------
-# Model, optimizer, loss
-# ---------------------------
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-model = BehaviorTransformer(state_dim=2, action_dim=2, seq_len=SEQ_LEN, k_bins=K_BINS).to(device)
-optimizer = optim.Adam(model.parameters(), lr=LR)
+    optimizer = optim.Adam(model.parameters(), lr=1e-4)
+    criterion_ce = nn.CrossEntropyLoss()
+    criterion_mse = nn.MSELoss()
 
-# Focal loss for bin classification
-def focal_loss(inputs, targets, gamma=2.0):
-    ce_loss = nn.CrossEntropyLoss(reduction='none')
-    logpt = -ce_loss(inputs.view(-1, K_BINS), targets.view(-1))
-    pt = torch.exp(logpt)
-    loss = -((1 - pt) ** gamma) * logpt
-    return loss.mean()
+    # -------------------
+    # Training loop
+    # -------------------
+    num_epochs = 10
+    best_val_loss = float("inf")
 
-# MT-Loss for residuals
-def mt_loss(pred_residuals, true_residuals, bin_indices):
-    """
-    pred_residuals: [B, seq_len, K_BINS, action_dim]
-    true_residuals: [B, seq_len, K_BINS, action_dim]
-    bin_indices: [B, seq_len]
-    """
-    B, seq_len, K, action_dim = pred_residuals.shape
-    loss = 0.0
-    for b in range(B):
-        for t in range(seq_len):
-            bin_idx = bin_indices[b, t]
-            loss += torch.norm(pred_residuals[b, t, bin_idx] - true_residuals[b, t, bin_idx]) ** 2
-    return loss / (B * seq_len)
+    for epoch in range(num_epochs):
+        print(f"\nEpoch {epoch+1}/{num_epochs}")
 
-# ---------------------------
-# Training loop
-# ---------------------------
-for epoch in range(1, EPOCHS + 1):
-    model.train()
-    total_loss = 0.0
-    for states, bin_indices_batch, residuals_batch in dataloader:
-        states = states.to(device)
-        bin_indices_batch = bin_indices_batch.to(device)
-        residuals_batch = residuals_batch.to(device)
+        # ---- Train ----
+        model.train()
+        train_loss = 0.0
+        for i, (state_seq, action_seq) in enumerate(train_loader):
+            state_seq = state_seq.to(device)
+            action_seq = action_seq.to(device)
 
-        optimizer.zero_grad()
-        bin_logits, pred_residuals = model(states)
-        loss_bin = focal_loss(bin_logits, bin_indices_batch)
-        loss_res = mt_loss(pred_residuals, residuals_batch, bin_indices_batch)
-        loss = loss_bin + loss_res
-        loss.backward()
-        optimizer.step()
-        total_loss += loss.item()
-    print(f"Epoch {epoch}/{EPOCHS}, Loss: {total_loss / len(dataloader):.6f}")
+            # Compute action bins and residuals
+            bin_labels = kmeans.predict(action_seq.view(-1, 2).cpu().numpy())
+            bin_labels = torch.tensor(bin_labels, dtype=torch.long, device=device)
+            residuals = action_seq.view(-1, 2) - torch.tensor(
+                kmeans.cluster_centers_[bin_labels.cpu().numpy()],
+                dtype=torch.float32,
+                device=device
+            )
 
-print("Training finished!")
+            # Forward
+            bin_logits, residual_preds = model(state_seq)
+
+            # Reshape residual_preds: [B*seq_len, k_bins, action_dim]
+            residual_preds = residual_preds.view(-1, 64, 2)
+            # Select only residuals corresponding to true bin
+            chosen_residuals = residual_preds[torch.arange(bin_labels.size(0)), bin_labels]
+
+            # Loss
+            loss_ce = criterion_ce(bin_logits.view(-1, 64), bin_labels)
+            loss_mse = criterion_mse(chosen_residuals, residuals)
+            loss = loss_ce + loss_mse
+
+            # Backprop
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+
+            train_loss += loss.item()
+
+            if (i+1) % 10 == 0:
+                print(f"  Batch {i+1}/{len(train_loader)} - Loss: {loss.item():.4f}")
+
+        avg_train_loss = train_loss / len(train_loader)
+        print(f"Average Train Loss: {avg_train_loss:.4f}")
+
+        # ---- Validation ----
+        model.eval()
+        val_loss = 0.0
+        correct_bins = 0
+        total_bins = 0
+
+        with torch.no_grad():
+            for state_seq, action_seq in val_loader:
+                state_seq = state_seq.to(device)
+                action_seq = action_seq.to(device)
+
+                bin_labels = kmeans.predict(action_seq.view(-1, 2).cpu().numpy())
+                bin_labels = torch.tensor(bin_labels, dtype=torch.long, device=device)
+                residuals = action_seq.view(-1, 2) - torch.tensor(
+                    kmeans.cluster_centers_[bin_labels.cpu().numpy()],
+                    dtype=torch.float32,
+                    device=device
+                )
+
+                bin_logits, residual_preds = model(state_seq)
+
+                residual_preds = residual_preds.view(-1, 64, 2)
+                chosen_residuals = residual_preds[torch.arange(bin_labels.size(0)), bin_labels]
+
+                loss_ce = criterion_ce(bin_logits.view(-1, 64), bin_labels)
+                loss_mse = criterion_mse(chosen_residuals, residuals)
+                loss = loss_ce + loss_mse
+                val_loss += loss.item()
+
+                # Accuracy for bins
+                preds = torch.argmax(bin_logits.view(-1, 64), dim=1)
+                correct_bins += (preds == bin_labels).sum().item()
+                total_bins += bin_labels.size(0)
+
+        avg_val_loss = val_loss / len(val_loader)
+        bin_acc = correct_bins / total_bins
+        print(f"Validation Loss: {avg_val_loss:.4f}, Bin Accuracy: {bin_acc*100:.2f}%")
+
+        # Save best model
+        if avg_val_loss < best_val_loss:
+            best_val_loss = avg_val_loss
+            torch.save(model.state_dict(), "trained_model.pth")
+            print("Saved new best model!")
+
+if __name__ == "__main__":
+    train_model()

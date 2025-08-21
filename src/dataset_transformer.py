@@ -2,8 +2,12 @@
 
 import torch
 from torch.utils.data import Dataset
+import numpy as np
 
-class PushTDataset(Dataset):
+
+
+
+class PushTSequenceDataset(Dataset):
     def __init__(self, df, seq_len=32):
         """
         df: pandas DataFrame for one episode
@@ -12,8 +16,8 @@ class PushTDataset(Dataset):
         self.seq_len = seq_len
 
         # Convert columns to tensors
-        self.states = torch.tensor(df['observation.state'].tolist(), dtype=torch.float32)
-        self.actions = torch.tensor(df['action'].tolist(), dtype=torch.float32)
+        self.states = torch.tensor(np.array(df['observation.state'].tolist()), dtype=torch.float32)
+        self.actions = torch.tensor(np.array(df['action'].tolist()), dtype=torch.float32)
 
         # Number of sequences
         self.num_seq = len(df) - seq_len
