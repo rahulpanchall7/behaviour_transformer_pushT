@@ -24,8 +24,8 @@ We use **LeRobot**, a framework for learning robotic behaviors:
    Follow the installation instructions in the [LeRobot GitHub repo](https://github.com/huggingface/lerobot).
 2. **Clone this repository**  
    ```bash
-   git clone <your-repo-url>
-   cd <your-repo>
+   git clone https://github.com/rahulpanchall7/behaviour_transformer_pushT.git
+   cd behaviour_transformer_pushT
 3. **Activate Conda Environment**
    ```bash
    conda activate lerobot
