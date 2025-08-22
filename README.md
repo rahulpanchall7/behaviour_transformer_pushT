@@ -39,7 +39,7 @@ We use **LeRobot**, a framework for learning robotic behaviors:
 7. **Train the Behavior Transformer model, for eg:**
    ```bash
     python src/train.py --history_length 10 --pred_horizon 32 --batch_size 32 --lr 1e-4
-8. **Evaluate the trained model and generate output videos:**
+8. **Evaluate the trained model and generate output video, for eg:**
     ```bash
    python src/evaluate.py \
     --model_path outputs/train/pusht_bet/bet_model.pt \
