@@ -58,7 +58,6 @@ class BehaviorTransformer(nn.Module):
         return bin_logits, residuals
 
 
-# Example usage
 if __name__ == "__main__":
     B = 8
     seq_len = 32

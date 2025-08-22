@@ -1,157 +1,115 @@
-# src/train.py
+# train_bt.py
 
 import torch
-import torch.nn as nn
-import torch.optim as optim
-from torch.utils.data import DataLoader, random_split
-from sklearn.cluster import KMeans
-import numpy as np
-
-from dataset_transformer import PushTSequenceDataset
+from torch.utils.data import DataLoader
+from pathlib import Path
+import argparse
+from dataloader import PushTSequenceDataset, dataset as pushT_dataset  # your dataloader
 from model import BehaviorTransformer
-from dataset import load_pusht_parquet
 
+# ===============================
+# Argument parser
+# ===============================
+parser = argparse.ArgumentParser()
+parser.add_argument("--history_length", type=int, default=6)
+parser.add_argument("--pred_horizon", type=int, default=64)
+parser.add_argument("--batch_size", type=int, default=32)
+parser.add_argument("--lr", type=float, default=1e-4)
+parser.add_argument("--training_steps", type=int, default=5000)
+parser.add_argument("--log_freq", type=int, default=100)
+parser.add_argument("--d_model", type=int, default=128)
+parser.add_argument("--n_heads", type=int, default=4)
+parser.add_argument("--n_layers", type=int, default=4)
+parser.add_argument("--k_bins", type=int, default=16)
+parser.add_argument("--output_dir", type=str, default="outputs/train/pusht_bet")
+args = parser.parse_args()
 
-def train_model():
-    # -------------------
-    # Load dataset
-    # -------------------
-    print("Loading dataset...")
-    df = load_pusht_parquet()
-    dataset = PushTSequenceDataset(df, seq_len=32)
-    print(f"Dataset loaded: {len(dataset)} sequences")
+# ===============================
+# Device and output path
+# ===============================
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+output_dir = Path(args.output_dir)
+output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Train/val split
-    val_size = int(0.1 * len(dataset))
-    train_size = len(dataset) - val_size
-    train_dataset, val_dataset = random_split(dataset, [train_size, val_size])
-    print(f"Split dataset: {train_size} train / {val_size} val")
+# ===============================
+# DataLoader
+# ===============================
+sequence_dataset = PushTSequenceDataset(pushT_dataset)
+dataloader = DataLoader(
+    sequence_dataset,
+    batch_size=args.batch_size,
+    shuffle=True,
+    num_workers=0,
+    drop_last=True
+)
 
-    train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=64)
+# ===============================
+# Model
+# ===============================
+state_dim = 2
+action_dim = 2
+seq_len = args.pred_horizon  # Use pred_horizon as seq_len
 
-    # -------------------
-    # KMeans for action discretization
-    # -------------------
-    print("Running KMeans on actions...")
-    all_actions = np.array(dataset.actions)
-    kmeans = KMeans(n_clusters=64, random_state=42).fit(all_actions)
-    print("KMeans fitted with 64 clusters")
+model = BehaviorTransformer(
+    state_dim=state_dim,
+    action_dim=action_dim,
+    seq_len=seq_len,
+    d_model=args.d_model,
+    n_heads=args.n_heads,
+    n_layers=args.n_layers,
+    k_bins=args.k_bins
+).to(device)
 
-    # -------------------
-    # Define model + optimizer
-    # -------------------
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Using device: {device}")
+optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+criterion = torch.nn.MSELoss()  # for residual regression
 
-    model = BehaviorTransformer(
-        state_dim=2, 
-        action_dim=2,
-        seq_len=32,
-        d_model=128,
-        n_heads=4,
-        n_layers=3,
-        k_bins=64
-    ).to(device)
+# ===============================
+# Training loop
+# ===============================
+step = 0
+done = False
 
-    optimizer = optim.Adam(model.parameters(), lr=1e-4)
-    criterion_ce = nn.CrossEntropyLoss()
-    criterion_mse = nn.MSELoss()
+while not done:
+    for obs_seq, future_actions in dataloader:
+        obs_seq = obs_seq.to(device)                
+        future_actions = future_actions.to(device)  
 
-    # -------------------
-    # Training loop
-    # -------------------
-    num_epochs = 10
-    best_val_loss = float("inf")
+        # Expand obs_seq to match seq_len
+        B, H, D = obs_seq.shape
+        if H < seq_len:
+            repeat_factor = seq_len // H
+            remainder = seq_len % H
+            obs_seq_exp = obs_seq.repeat(1, repeat_factor, 1)
+            if remainder > 0:
+                obs_seq_exp = torch.cat([obs_seq_exp, obs_seq[:, :remainder, :]], dim=1)
+            obs_seq = obs_seq_exp
 
-    for epoch in range(num_epochs):
-        print(f"\nEpoch {epoch+1}/{num_epochs}")
+        # Forward pass
+        bin_logits, residuals = model(obs_seq)
 
-        # ---- Train ----
-        model.train()
-        train_loss = 0.0
-        for i, (state_seq, action_seq) in enumerate(train_loader):
-            state_seq = state_seq.to(device)
-            action_seq = action_seq.to(device)
+        # Convert bins + residuals to continuous actions
+        bin_indices = bin_logits.argmax(dim=-1)
+        pred_actions = torch.gather(
+            residuals, 2, bin_indices.unsqueeze(-1).unsqueeze(-1).expand(-1, seq_len, 1, action_dim)
+        ).squeeze(2)
 
-            # Compute action bins and residuals
-            bin_labels = kmeans.predict(action_seq.view(-1, 2).cpu().numpy())
-            bin_labels = torch.tensor(bin_labels, dtype=torch.long, device=device)
-            residuals = action_seq.view(-1, 2) - torch.tensor(
-                kmeans.cluster_centers_[bin_labels.cpu().numpy()],
-                dtype=torch.float32,
-                device=device
-            )
+        pred_actions = pred_actions[:, :args.pred_horizon, :]
 
-            # Forward
-            bin_logits, residual_preds = model(state_seq)
+        # Compute loss
+        loss = criterion(pred_actions, future_actions[:, :args.pred_horizon, :])
 
-            # Reshape residual_preds: [B*seq_len, k_bins, action_dim]
-            residual_preds = residual_preds.view(-1, 64, 2)
-            # Select only residuals corresponding to true bin
-            chosen_residuals = residual_preds[torch.arange(bin_labels.size(0)), bin_labels]
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
 
-            # Loss
-            loss_ce = criterion_ce(bin_logits.view(-1, 64), bin_labels)
-            loss_mse = criterion_mse(chosen_residuals, residuals)
-            loss = loss_ce + loss_mse
+        if step % args.log_freq == 0:
+            print(f"Step {step}: Loss = {loss.item():.4f}")
 
-            # Backprop
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
+        step += 1
+        if step >= args.training_steps:
+            done = True
+            break
 
-            train_loss += loss.item()
-
-            if (i+1) % 10 == 0:
-                print(f"  Batch {i+1}/{len(train_loader)} - Loss: {loss.item():.4f}")
-
-        avg_train_loss = train_loss / len(train_loader)
-        print(f"Average Train Loss: {avg_train_loss:.4f}")
-
-        # ---- Validation ----
-        model.eval()
-        val_loss = 0.0
-        correct_bins = 0
-        total_bins = 0
-
-        with torch.no_grad():
-            for state_seq, action_seq in val_loader:
-                state_seq = state_seq.to(device)
-                action_seq = action_seq.to(device)
-
-                bin_labels = kmeans.predict(action_seq.view(-1, 2).cpu().numpy())
-                bin_labels = torch.tensor(bin_labels, dtype=torch.long, device=device)
-                residuals = action_seq.view(-1, 2) - torch.tensor(
-                    kmeans.cluster_centers_[bin_labels.cpu().numpy()],
-                    dtype=torch.float32,
-                    device=device
-                )
-
-                bin_logits, residual_preds = model(state_seq)
-
-                residual_preds = residual_preds.view(-1, 64, 2)
-                chosen_residuals = residual_preds[torch.arange(bin_labels.size(0)), bin_labels]
-
-                loss_ce = criterion_ce(bin_logits.view(-1, 64), bin_labels)
-                loss_mse = criterion_mse(chosen_residuals, residuals)
-                loss = loss_ce + loss_mse
-                val_loss += loss.item()
-
-                # Accuracy for bins
-                preds = torch.argmax(bin_logits.view(-1, 64), dim=1)
-                correct_bins += (preds == bin_labels).sum().item()
-                total_bins += bin_labels.size(0)
-
-        avg_val_loss = val_loss / len(val_loader)
-        bin_acc = correct_bins / total_bins
-        print(f"Validation Loss: {avg_val_loss:.4f}, Bin Accuracy: {bin_acc*100:.2f}%")
-
-        # Save best model
-        if avg_val_loss < best_val_loss:
-            best_val_loss = avg_val_loss
-            torch.save(model.state_dict(), "trained_model.pth")
-            print("Saved new best model!")
-
-if __name__ == "__main__":
-    train_model()
+# Save trained model
+torch.save(model.state_dict(), output_dir / "bet_model.pt")
+print(f"Model saved to {output_dir / 'bet_model.pt'}")
