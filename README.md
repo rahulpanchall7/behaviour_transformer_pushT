@@ -75,6 +75,11 @@ Implemented a **Behavior Transformer (BeT)** for robotic manipulation using the 
 - **Evaluation**: Robot remains mostly stationary and does not push the T object.  
 - **Video output**: Rollout video shows limited movement and no task success.  
 - **Analysis**: Current hyperparameters, dataset size, and training duration are insufficient for learning meaningful behaviors.
+  
+<video width="480" controls>
+  <source src="outputs/eval/pusht_bet/rollout_bt.mp4" type="video/mp4">
+  Your browser does not support the video tag.
+</video>
 
 ### Improvements and Scaling
 - Increase training steps and dataset coverage.
