@@ -8,10 +8,5 @@ venv/
 # VS Code
 .vscode/
 
-# Data and outputs
-data/
-outputs/
-logs/
-
 # Others
 *.log
