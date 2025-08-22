@@ -52,7 +52,7 @@ We use **LeRobot**, a framework for learning robotic behaviors:
 ## Report: Behavior Transformer for PushT
 
 ### Description of the Implementation
-We implemented a **Behavior Transformer (BeT)** for robotic manipulation using the **PushT** benchmark in the **LeRobot** framework.  
+Implemented a **Behavior Transformer (BeT)** for robotic manipulation using the **PushT** benchmark in the **LeRobot** framework.  
 - The model takes **past agent states** (`history_length`) as input and predicts a sequence of future actions (`pred_horizon`) using a Transformer-based architecture.  
 - **State dimension**: 2 (agent position), **Action dimension**: 2 (velocity commands).  
 - The model predicts **discretized action bins** with **residuals** to generate continuous actions.  
